@@ -1,0 +1,112 @@
+name: Build Flutter Project
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  extract-version:
+    runs-on: ubuntu-latest
+    outputs:
+      app-name: ${{ steps.extract.outputs.app-name }}
+      version: ${{ steps.extract.outputs.version }}
+      safe-app-name: ${{ steps.extract.outputs.safe-app-name }}
+      safe-version: ${{ steps.extract.outputs.safe-version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract app name and version from pubspec.yaml
+        id: extract
+        run: |
+          # Extrae name y version, maneja comillas opcionales y trims
+          APP_NAME=$(sed -n 's/^name:\s*\( *\([^"]*\|\("[^"]*"\)\)\s*$/\2/p' pubspec.yaml | sed 's/^"//;s/"$//')
+          VERSION=$(sed -n 's/^version:\s*\( *\([^"]*\|\("[^"]*"\)\)\s*$/\2/p' pubspec.yaml | sed 's/^"//;s/"$//')
+          
+          # Nombres seguros para archivos (espacios y especiales → _)
+          SAFE_APP_NAME=$(echo "$APP_NAME" | sed 's/ /_/g')
+          SAFE_VERSION=$(echo "$VERSION" | sed 's/\./_/g' | sed 's/+/\_/g')
+          
+          echo "app-name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "safe-app-name=$SAFE_APP_NAME" >> $GITHUB_OUTPUT
+          echo "safe-version=$SAFE_VERSION" >> $GITHUB_OUTPUT
+
+
+  build-android:
+    needs: extract-version
+    runs-on: ubuntu-latest
+    env:
+      APP_NAME: ${{ needs.extract-version.outputs.app-name }}
+      VERSION: ${{ needs.extract-version.outputs.version }}
+      SAFE_APP_NAME: ${{ needs.extract-version.outputs.safe-app-name }}
+      SAFE_VERSION: ${{ needs.extract-version.outputs.safe-version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: 'stable'
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Android APK
+        run: flutter build apk --release
+
+      - name: Rename APK with safe app name and version
+        run: |
+          APK_NAME="${{ env.SAFE_APP_NAME }}_${{ env.SAFE_VERSION }}_android.apk"
+          mv build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/${APK_NAME}"
+
+      - name: Upload Android APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ env.APP_NAME }}-${{ env.VERSION }}
+          path: build/app/outputs/flutter-apk/${{ env.SAFE_APP_NAME }}_${{ env.SAFE_VERSION }}_android.apk
+
+  create-release:
+    needs: [extract-version, build-android]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Para crear releases
+    env:
+      APP_NAME: ${{ needs.extract-version.outputs.app-name }}
+      VERSION: ${{ needs.extract-version.outputs.version }}
+      SAFE_APP_NAME: ${{ needs.extract-version.outputs.safe-app-name }}
+      SAFE_VERSION: ${{ needs.extract-version.outputs.safe-version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Para tags
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-${{ env.APP_NAME }}-${{ env.VERSION }}
+          path: ./android-artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Release ${{ env.VERSION }} - ${{ env.APP_NAME }}
+          body: |
+            ## Cambios en esta versión
+            - Build automático para Android y Windows.
+            - APK: ${{ env.SAFE_APP_NAME }}_${{ env.SAFE_VERSION }}_android.apk
+          draft: false
+          prerelease: false
+          files: |
+            ./android-artifacts/${{ env.SAFE_APP_NAME }}_${{ env.SAFE_VERSION }}_android.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
